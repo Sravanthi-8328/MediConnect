@@ -13,20 +13,56 @@ import './styles/index.css';
 
 const ProtectedRoute = ({ user, children }) => {
   if (!user) {
-    return <Navigate to="/login" replace />;
+    return <Navigate to="/" replace />;
   }
   return children;
+};
+
+const PublicAuthRoute = ({ user, children }) => {
+  if (!user) {
+    return children;
+  }
+
+  const roleRoute = {
+    Admin: '/admin-dashboard',
+    Doctor: '/doctor-dashboard',
+    Patient: '/patient-dashboard',
+    Pharmacist: '/pharmacist-dashboard',
+  };
+
+  return <Navigate to={roleRoute[user.role] || '/'} replace />;
 };
 
 const App = () => {
   const { currentUser } = useAppContext();
 
+  const roleRoute = {
+    Admin: '/admin-dashboard',
+    Doctor: '/doctor-dashboard',
+    Patient: '/patient-dashboard',
+    Pharmacist: '/pharmacist-dashboard',
+  };
+
   return (
     <Router>
       <Routes>
         {/* Auth Routes */}
-        <Route path="/login" element={<Login />} />
-        <Route path="/register" element={<Register />} />
+        <Route
+          path="/login"
+          element={
+            <PublicAuthRoute user={currentUser}>
+              <Login />
+            </PublicAuthRoute>
+          }
+        />
+        <Route
+          path="/register"
+          element={
+            <PublicAuthRoute user={currentUser}>
+              <Register />
+            </PublicAuthRoute>
+          }
+        />
 
         {/* Protected Routes */}
         <Route
@@ -98,7 +134,22 @@ const App = () => {
         />
 
         {/* Landing Page - Home Route */}
-        <Route path="/" element={<LandingPage />} />
+        <Route
+          path="/"
+          element={
+            currentUser
+              ? <Navigate to={roleRoute[currentUser.role] || '/'} replace />
+              : <LandingPage />
+          }
+        />
+        <Route
+          path="*"
+          element={
+            currentUser
+              ? <Navigate to={roleRoute[currentUser.role] || '/'} replace />
+              : <LandingPage />
+          }
+        />
       </Routes>
     </Router>
   );

@@ -9,6 +9,7 @@ const Register = () => {
   const [formData, setFormData] = useState({
     name: '',
     email: '',
+    phone: '',
     password: '',
     confirmPassword: '',
     role: 'Patient',
@@ -17,7 +18,7 @@ const Register = () => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const roles = ['Patient', 'Doctor', 'Pharmacist'];
+  const roles = ['Patient', 'Doctor', 'Pharmacist', 'Admin'];
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -45,6 +46,14 @@ const Register = () => {
       setError('Please enter a valid email address');
       return false;
     }
+    if (!formData.phone.trim()) {
+      setError('Please enter your phone number');
+      return false;
+    }
+    if (!/^\+?[0-9\s-]{10,15}$/.test(formData.phone.trim())) {
+      setError('Please enter a valid phone number');
+      return false;
+    }
     if (!formData.password) {
       setError('Please enter a password');
       return false;
@@ -67,16 +76,24 @@ const Register = () => {
 
     setLoading(true);
 
-    setTimeout(() => {
-      const result = registerUser(
+    setTimeout(async () => {
+      const result = await registerUser(
         formData.name,
         formData.email,
         formData.password,
-        formData.role
+        formData.role,
+        formData.phone
       );
 
       if (result.success) {
-        navigate('/login', { state: { message: result.message } });
+        navigate('/login', {
+          state: {
+            message: result.message,
+            role: formData.role,
+            email: formData.email,
+            authMethod: 'email',
+          },
+        });
       } else {
         setError(result.message);
       }
@@ -93,6 +110,10 @@ const Register = () => {
       </div>
 
       <div className="auth-card register-card">
+        <div className="auth-card-top">
+          <Link to="/" className="auth-home-link">← Back to Home page</Link>
+        </div>
+
         <div className="auth-header">
           <div className="auth-logo">
             <span className="logo-icon">🏥</span>
@@ -136,6 +157,21 @@ const Register = () => {
               value={formData.email}
               onChange={handleChange}
               placeholder="Enter your email"
+              className="auth-input"
+            />
+          </div>
+
+          <div className="auth-form-group">
+            <label className="auth-label">
+              <span className="label-icon">📱</span>
+              Phone Number
+            </label>
+            <input
+              type="tel"
+              name="phone"
+              value={formData.phone}
+              onChange={handleChange}
+              placeholder="Enter your mobile number"
               className="auth-input"
             />
           </div>
@@ -194,6 +230,7 @@ const Register = () => {
                     {role === 'Patient' && '👤'}
                     {role === 'Doctor' && '👨‍⚕️'}
                     {role === 'Pharmacist' && '💊'}
+                    {role === 'Admin' && '🛡️'}
                   </span>
                   <span className="role-name">{role}</span>
                 </label>

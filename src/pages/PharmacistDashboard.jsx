@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useAppContext } from '../context/AppContext';
+import { useLanguage } from '../context/LanguageContext';
 
 const PharmacistDashboard = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -22,6 +23,7 @@ const PharmacistDashboard = () => {
     markNotificationAsRead,
     markAllNotificationsAsRead,
   } = useAppContext();
+  const { selectedLanguage, setSelectedLanguage, languageOptions, t } = useLanguage();
 
   const [activeSection, setActiveSection] = useState(searchParams.get('section') || 'dashboard');
   const [showNotifications, setShowNotifications] = useState(false);
@@ -31,6 +33,9 @@ const PharmacistDashboard = () => {
   const [showInventoryModal, setShowInventoryModal] = useState(false);
   const [filterStatus, setFilterStatus] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [inventorySearchQuery, setInventorySearchQuery] = useState('');
+  const [inventoryCategoryFilter, setInventoryCategoryFilter] = useState('all');
+  const [inventoryStockFilter, setInventoryStockFilter] = useState('all');
 
   // New inventory item form
   const [newInventoryItem, setNewInventoryItem] = useState({
@@ -57,12 +62,22 @@ const PharmacistDashboard = () => {
     setSearchParams({ section });
   };
 
+  const formatInr = (amount) => new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    maximumFractionDigits: 0,
+  }).format(Number(amount || 0));
+
   // Get data
   const stats = getPharmacistStats();
   const prescriptionQueue = getPrescriptionsForPharmacist();
   const lowStockItems = getLowStockItems();
   const notifications = getNotificationsByUser(currentUser.id);
   const unreadCount = getUnreadNotificationsCount(currentUser.id);
+  const ninetyDaysFromNow = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+  const expiringSoonItems = inventory.filter((item) => new Date(item.expiryDate) < ninetyDaysFromNow);
+  const inventoryValue = inventory.reduce((sum, item) => sum + Number(item.price || 0) * Number(item.stock || 0), 0);
+  const inventoryCategories = [...new Set(inventory.map((item) => item.category).filter(Boolean))].sort();
 
   // Filter prescriptions
   const filteredPrescriptions = prescriptionQueue.filter(p => {
@@ -82,6 +97,58 @@ const PharmacistDashboard = () => {
       order.trackingId.toLowerCase().includes(searchQuery.toLowerCase());
     return matchesStatus && matchesSearch;
   });
+
+  const filteredInventory = inventory.filter((item) => {
+    const query = inventorySearchQuery.trim().toLowerCase();
+    const matchesSearch = !query
+      || (item.name || '').toLowerCase().includes(query)
+      || (item.supplier || '').toLowerCase().includes(query)
+      || (item.category || '').toLowerCase().includes(query);
+
+    const matchesCategory = inventoryCategoryFilter === 'all' || item.category === inventoryCategoryFilter;
+
+    const isLow = Number(item.stock || 0) <= Number(item.minStock || 0);
+    const isOut = Number(item.stock || 0) <= 0;
+    const isExpiring = new Date(item.expiryDate) < ninetyDaysFromNow;
+
+    let matchesStock = true;
+    if (inventoryStockFilter === 'low') matchesStock = isLow;
+    if (inventoryStockFilter === 'out') matchesStock = isOut;
+    if (inventoryStockFilter === 'expiring') matchesStock = isExpiring;
+
+    return matchesSearch && matchesCategory && matchesStock;
+  });
+
+  const handleExportInventoryCsv = () => {
+    if (filteredInventory.length === 0) {
+      alert('No inventory rows to export for current filters.');
+      return;
+    }
+
+    const csvLines = [
+      ['Medicine', 'Category', 'Stock', 'MinStock', 'Price', 'Unit', 'Supplier', 'ExpiryDate'].join(','),
+      ...filteredInventory.map((item) => [
+        `"${(item.name || '').replace(/"/g, '""')}"`,
+        `"${(item.category || '').replace(/"/g, '""')}"`,
+        Number(item.stock || 0),
+        Number(item.minStock || 0),
+        Number(item.price || 0).toFixed(2),
+        `"${(item.unit || '').replace(/"/g, '""')}"`,
+        `"${(item.supplier || '').replace(/"/g, '""')}"`,
+        item.expiryDate || '',
+      ].join(',')),
+    ];
+
+    const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `inventory-export-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
 
   // Handle accept order
   const handleAcceptOrder = (prescription) => {
@@ -142,10 +209,18 @@ const PharmacistDashboard = () => {
       {/* Header */}
       <div className="dashboard-header">
         <div className="greeting">
-          <h1>Pharmacy Dashboard 💊</h1>
+          <h1>{t('Pharmacy Dashboard')} 💊</h1>
           <p>Welcome back, {currentUser.name}. Manage prescriptions and orders.</p>
         </div>
         <div className="header-actions">
+          <label className="patient-language-select">
+            <span>{t('Choose Language')}</span>
+            <select value={selectedLanguage} onChange={(e) => setSelectedLanguage(e.target.value)}>
+              {languageOptions.map((lang) => (
+                <option key={lang} value={lang}>{lang}</option>
+              ))}
+            </select>
+          </label>
           <div className="notification-bell" onClick={() => setShowNotifications(!showNotifications)}>
             <span className="bell-icon">🔔</span>
             {unreadCount > 0 && <span className="notification-badge">{unreadCount}</span>}
@@ -160,14 +235,14 @@ const PharmacistDashboard = () => {
       {showNotifications && (
         <div className="notifications-dropdown">
           <div className="notifications-header">
-            <h3>Notifications</h3>
+            <h3>{t('Notifications')}</h3>
             {unreadCount > 0 && (
-              <button onClick={() => markAllNotificationsAsRead(currentUser.id)}>Mark all read</button>
+              <button onClick={() => markAllNotificationsAsRead(currentUser.id)}>{t('Mark all read')}</button>
             )}
           </div>
           <div className="notifications-list">
             {notifications.length === 0 ? (
-              <div className="empty-notifications">No notifications</div>
+              <div className="empty-notifications">{t('No notifications')}</div>
             ) : (
               notifications.slice(0, 5).map(notification => (
                 <div 
@@ -193,25 +268,25 @@ const PharmacistDashboard = () => {
           className={`nav-tab ${activeSection === 'dashboard' ? 'active' : ''}`}
           onClick={() => handleSectionChange('dashboard')}
         >
-          <span>🏠</span> Dashboard
+          <span>🏠</span> {t('Dashboard')}
         </button>
         <button 
           className={`nav-tab ${activeSection === 'prescriptions' ? 'active' : ''}`}
           onClick={() => handleSectionChange('prescriptions')}
         >
-          <span>📋</span> Prescriptions
+          <span>📋</span> {t('Prescriptions')}
         </button>
         <button 
           className={`nav-tab ${activeSection === 'orders' ? 'active' : ''}`}
           onClick={() => handleSectionChange('orders')}
         >
-          <span>📦</span> Orders
+          <span>📦</span> {t('Orders')}
         </button>
         <button 
           className={`nav-tab ${activeSection === 'inventory' ? 'active' : ''}`}
           onClick={() => handleSectionChange('inventory')}
         >
-          <span>🏪</span> Inventory
+          <span>🏪</span> {t('Inventory')}
         </button>
         <button 
           className={`nav-tab ${activeSection === 'delivery' ? 'active' : ''}`}
@@ -257,6 +332,20 @@ const PharmacistDashboard = () => {
                   <div className="stat-label">Out for Delivery</div>
                 </div>
               </div>
+              <div className="stat-card stat-success" onClick={() => handleSectionChange('inventory')}>
+                <div className="stat-icon">📊</div>
+                <div className="stat-info">
+                  <div className="stat-value">{formatInr(inventoryValue)}</div>
+                  <div className="stat-label">Inventory Value</div>
+                </div>
+              </div>
+              <div className="stat-card stat-warning" onClick={() => handleSectionChange('inventory')}>
+                <div className="stat-icon">⏳</div>
+                <div className="stat-info">
+                  <div className="stat-value">{expiringSoonItems.length}</div>
+                  <div className="stat-label">Expiring in 90 Days</div>
+                </div>
+              </div>
             </div>
 
             {/* Low Stock Alert */}
@@ -299,6 +388,10 @@ const PharmacistDashboard = () => {
                 <button className="action-btn" onClick={() => { handleSectionChange('inventory'); setShowInventoryModal(true); }}>
                   <span className="action-icon">➕</span>
                   <span>Add Medicine</span>
+                </button>
+                <button className="action-btn" onClick={() => { handleSectionChange('inventory'); setInventoryStockFilter('expiring'); }}>
+                  <span className="action-icon">⏳</span>
+                  <span>Expiring Soon</span>
                 </button>
               </div>
             </div>
@@ -501,7 +594,7 @@ const PharmacistDashboard = () => {
                             )}
                           </div>
                         </td>
-                        <td className="amount-cell">${order.totalAmount.toFixed(2)}</td>
+                        <td className="amount-cell">{formatInr(order.totalAmount)}</td>
                         <td>
                           <span className={`badge ${getStatusColor(order.status)}`}>{order.status}</span>
                         </td>
@@ -555,9 +648,41 @@ const PharmacistDashboard = () => {
           <div className="section-inventory">
             <div className="section-header">
               <h2>🏪 Inventory Management</h2>
-              <button className="btn btn-primary" onClick={() => setShowInventoryModal(true)}>
-                ➕ Add Medicine
-              </button>
+              <div className="section-filters">
+                <input
+                  type="text"
+                  placeholder="Search by medicine, category, supplier..."
+                  value={inventorySearchQuery}
+                  onChange={(e) => setInventorySearchQuery(e.target.value)}
+                  className="search-input"
+                />
+                <select
+                  value={inventoryCategoryFilter}
+                  onChange={(e) => setInventoryCategoryFilter(e.target.value)}
+                  className="filter-select"
+                >
+                  <option value="all">All Categories</option>
+                  {inventoryCategories.map((category) => (
+                    <option key={category} value={category}>{category}</option>
+                  ))}
+                </select>
+                <select
+                  value={inventoryStockFilter}
+                  onChange={(e) => setInventoryStockFilter(e.target.value)}
+                  className="filter-select"
+                >
+                  <option value="all">All Stock</option>
+                  <option value="low">Low Stock</option>
+                  <option value="out">Out of Stock</option>
+                  <option value="expiring">Expiring Soon</option>
+                </select>
+                <button className="btn btn-secondary" onClick={handleExportInventoryCsv}>
+                  ⬇ Export CSV
+                </button>
+                <button className="btn btn-primary" onClick={() => setShowInventoryModal(true)}>
+                  ➕ Add Medicine
+                </button>
+              </div>
             </div>
 
             {/* Low Stock Warning */}
@@ -583,7 +708,7 @@ const PharmacistDashboard = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {inventory.map(item => (
+                  {filteredInventory.map(item => (
                     <tr key={item.id} className={item.stock <= item.minStock ? 'low-stock-row' : ''}>
                       <td>
                         <div className="medicine-cell">
@@ -609,7 +734,7 @@ const PharmacistDashboard = () => {
                         </div>
                       </td>
                       <td>{item.minStock}</td>
-                      <td>${item.price.toFixed(2)}</td>
+                      <td>{formatInr(item.price)}</td>
                       <td>{item.supplier}</td>
                       <td>
                         <span className={`expiry-date ${new Date(item.expiryDate) < new Date(Date.now() + 90*24*60*60*1000) ? 'expiring-soon' : ''}`}>
@@ -623,6 +748,13 @@ const PharmacistDashboard = () => {
                   ))}
                 </tbody>
               </table>
+              {filteredInventory.length === 0 && (
+                <div className="empty-state">
+                  <div className="empty-icon">🔎</div>
+                  <h3>No medicines found</h3>
+                  <p>Try adjusting the inventory filters.</p>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -687,7 +819,7 @@ const PharmacistDashboard = () => {
 
                           <div className="delivery-items">
                             <h5>Items: {order.medicines.length}</h5>
-                            <p>Total: ${order.totalAmount.toFixed(2)}</p>
+                            <p>Total: {formatInr(order.totalAmount)}</p>
                           </div>
                         </div>
 
@@ -881,7 +1013,7 @@ const PharmacistDashboard = () => {
                     />
                   </div>
                   <div className="form-group">
-                    <label>Price ($)</label>
+                    <label>Price (INR)</label>
                     <input
                       type="number"
                       step="0.01"

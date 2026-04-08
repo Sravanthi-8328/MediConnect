@@ -1,9 +1,10 @@
 import { useAppContext } from '../context/AppContext';
 
 const AppointmentCard = ({ appointment, viewMode }) => {
-  const { getUserById, updateAppointmentStatus } = useAppContext();
+  const { getUserById, getDoctorById, updateAppointmentStatus } = useAppContext();
 
   const doctor = getUserById(appointment.doctorId);
+  const doctorProfile = getDoctorById(appointment.doctorId);
   const patient = getUserById(appointment.patientId);
 
   const getStatusBadgeClass = (status) => {
@@ -26,7 +27,7 @@ const AppointmentCard = ({ appointment, viewMode }) => {
               <strong>Doctor:</strong> {doctor?.name}
             </div>
             <div style={{ marginBottom: '10px' }}>
-              <strong>Specialization:</strong> Cardiology
+              <strong>Specialization:</strong> {doctorProfile?.specialization || 'General Physician'}
             </div>
           </>
         ) : (

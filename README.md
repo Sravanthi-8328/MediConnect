@@ -103,17 +103,17 @@ The application comes with pre-configured demo users for testing:
 - **Role**: Admin
 
 ### Doctors
-- **Name**: Dr. Sarah Smith (Cardiologist)
-- **Name**: Dr. John Doe (Neurologist)
-- **Name**: Dr. Emily Brown (Pediatrician)
+- **Name**: Dr. Ananya Rao (Cardiologist)
+- **Name**: Dr. Arjun Menon (Neurologist)
+- **Name**: Dr. Meera Iyer (Pediatrician)
 
 ### Patients
-- **Name**: John Patient
-- **Name**: Jane Patient
-- **Name**: Mike Patient
+- **Name**: Rahul Sharma
+- **Name**: Neha Gupta
+- **Name**: Kiran Patel
 
 ### Pharmacist
-- **Name**: Pharmacy Manager
+- **Name**: Priyanka Das
 
 ## 🏗️ Technology Stack
 

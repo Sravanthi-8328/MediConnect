@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useAppContext } from '../context/AppContext';
+import { useLanguage } from '../context/LanguageContext';
 
 const DoctorDashboard = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -16,6 +17,7 @@ const DoctorDashboard = () => {
     getPatientHistoryForDoctor,
     getLabReportsByPatient,
     getHealthRecordsByPatient,
+    addLabReport,
     getPrescriptionsByPatient,
     getNotificationsByUser,
     getUnreadNotificationsCount,
@@ -25,11 +27,14 @@ const DoctorDashboard = () => {
     rejectAppointment,
     completeConsultation,
     addPrescription,
+    getPrescriptionSuggestions,
+    getAppointmentMeetingLink,
     updateDoctorProfile,
     updateDoctorAvailability,
     getUserById,
     getDoctorById,
   } = useAppContext();
+  const { selectedLanguage, setSelectedLanguage, languageOptions, t } = useLanguage();
 
   const [activeSection, setActiveSection] = useState(searchParams.get('section') || 'dashboard');
 
@@ -52,9 +57,16 @@ const DoctorDashboard = () => {
   const [showConsultationModal, setShowConsultationModal] = useState(false);
   const [showPatientRecordsModal, setShowPatientRecordsModal] = useState(false);
   const [showPrescriptionModal, setShowPrescriptionModal] = useState(false);
+  const [showVideoCallModal, setShowVideoCallModal] = useState(false);
+  const [videoCallUrl, setVideoCallUrl] = useState('');
+  const [copiedVideoCallLink, setCopiedVideoCallLink] = useState('');
   const [selectedAppointment, setSelectedAppointment] = useState(null);
   const [selectedPatient, setSelectedPatient] = useState(null);
   const [patientRecordTab, setPatientRecordTab] = useState('appointments');
+  const [patientSearchQuery, setPatientSearchQuery] = useState('');
+  const [appointmentSearchQuery, setAppointmentSearchQuery] = useState('');
+  const [appointmentTypeFilter, setAppointmentTypeFilter] = useState('all');
+  const [appointmentStatusFilter, setAppointmentStatusFilter] = useState('all');
 
   // Get doctor profile
   const doctorProfile = getDoctorById(currentUser.id);
@@ -88,6 +100,269 @@ const DoctorDashboard = () => {
   const myPatients = getPatientsForDoctor(currentUser.id);
   const notifications = getNotificationsByUser(currentUser.id);
   const unreadCount = getUnreadNotificationsCount(currentUser.id);
+  const completedToday = completedAppointments.filter((apt) => apt.date === new Date().toISOString().split('T')[0]).length;
+  const completionRate = todayAppointments.length > 0 ? Math.round((completedToday / todayAppointments.length) * 100) : 0;
+  const avgConsultationFee = todayAppointments.length > 0
+    ? Math.round(todayAppointments.reduce((acc, apt) => acc + Number(apt.consultationFee || doctorProfile?.fee || 0), 0) / todayAppointments.length)
+    : Math.round(Number(doctorProfile?.fee || 0));
+  const estimatedTodayRevenue = Math.round((completedToday || todayAppointments.length) * Number(doctorProfile?.fee || 0));
+  const responseSla = pendingRequests.length === 0 ? 'On Track' : pendingRequests.length <= 2 ? 'Needs Attention' : 'Critical';
+  const priorityQueue = [...pendingRequests, ...todayAppointments]
+    .filter((apt, idx, arr) => arr.findIndex((x) => x.id === apt.id) === idx)
+    .slice(0, 5);
+  const dailyCapacityTarget = 8;
+
+  const weeklyCapacityPlan = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date();
+    date.setDate(date.getDate() + index);
+    const isoDate = date.toISOString().split('T')[0];
+    const appointmentsCount = [...todayAppointments, ...upcomingAppointments].filter((apt) => apt.date === isoDate).length;
+    const utilization = Math.min(100, Math.round((appointmentsCount / dailyCapacityTarget) * 100));
+
+    return {
+      date: isoDate,
+      label: date.toLocaleDateString('en-US', { weekday: 'short' }),
+      appointmentsCount,
+      utilization,
+      freeSlots: Math.max(dailyCapacityTarget - appointmentsCount, 0),
+    };
+  });
+
+  const highRiskPatients = myPatients
+    .map((patient) => {
+      const age = Number(patient?.profile?.age || 0);
+      const conditions = patient?.profile?.conditions?.length || 0;
+      const allergies = patient?.profile?.allergies?.length || 0;
+      const riskScore = conditions + allergies + (age >= 60 ? 1 : 0);
+      return {
+        patient,
+        riskScore,
+      };
+    })
+    .filter((entry) => entry.riskScore >= 2)
+    .sort((a, b) => b.riskScore - a.riskScore)
+    .slice(0, 5);
+
+  const followUpQueue = completedAppointments
+    .filter((apt) => !hasPrescriptionForAppointment(apt.id))
+    .sort((a, b) => new Date(b.date) - new Date(a.date))
+    .slice(0, 5);
+
+  const symptomIntelligence = [...pendingRequests, ...todayAppointments, ...upcomingAppointments]
+    .reduce((acc, appointment) => {
+      const primarySymptom = (appointment.symptoms || '')
+        .split(/[;,]/)[0]
+        .trim()
+        .toLowerCase();
+
+      if (!primarySymptom) {
+        return acc;
+      }
+
+      const key = primarySymptom.length > 22 ? `${primarySymptom.slice(0, 22)}...` : primarySymptom;
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+  const topSymptoms = Object.entries(symptomIntelligence)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6);
+  const totalPlannedConsults = weeklyCapacityPlan.reduce((sum, slot) => sum + slot.appointmentsCount, 0);
+  const avgCapacityUtilization = weeklyCapacityPlan.length > 0
+    ? Math.round(weeklyCapacityPlan.reduce((sum, slot) => sum + slot.utilization, 0) / weeklyCapacityPlan.length)
+    : 0;
+  const consultMixVideoCount = [...todayAppointments, ...upcomingAppointments]
+    .filter((apt) => isVideoAppointment(apt)).length;
+  const consultMixClinicCount = [...todayAppointments, ...upcomingAppointments].length - consultMixVideoCount;
+
+  const carePrograms = [
+    {
+      id: 'primary',
+      title: 'Primary Consultation',
+      description: 'Fast video-first access for common and urgent complaints.',
+      metric: `${todayAppointments.length} active today`,
+    },
+    {
+      id: 'second-opinion',
+      title: 'Second Opinion Desk',
+      description: 'Case review for treatment confirmation and escalation checks.',
+      metric: `${pendingRequests.length} requests awaiting triage`,
+    },
+    {
+      id: 'multispecialty',
+      title: 'Multispecialty Coordination',
+      description: 'Coordinate referral-ready patients with specialists quickly.',
+      metric: `${myPatients.length} patients in roster`,
+    },
+    {
+      id: 'followup',
+      title: 'Follow-up Continuity',
+      description: 'Close loops on diagnosis, prescriptions, and recovery plans.',
+      metric: `${followUpQueue.length} follow-ups pending`,
+    },
+  ];
+
+  const trustSignals = [
+    'Board-certified workflow standards',
+    'Secure patient records and consultation notes',
+    'Structured diagnosis to prescription handoff',
+    'Operational queue with SLA awareness',
+  ];
+
+  const patientExperienceNotes = [
+    {
+      title: 'Consultation access',
+      note: `${todayAppointments.length > 0 ? 'High' : 'Normal'} appointment activity with ${upcomingAppointments.length} upcoming slots`,
+    },
+    {
+      title: 'Care completion',
+      note: `${completionRate}% throughput on today\'s queue`,
+    },
+    {
+      title: 'Follow-up discipline',
+      note: `${Math.max(completedAppointments.length - followUpQueue.length, 0)} completed visits with documented outputs`,
+    },
+  ];
+
+  const filteredPatients = myPatients.filter((patient) => {
+    if (!patientSearchQuery.trim()) return true;
+    const query = patientSearchQuery.toLowerCase();
+    return (
+      (patient.name || '').toLowerCase().includes(query) ||
+      (patient.email || '').toLowerCase().includes(query) ||
+      (patient.phone || '').toLowerCase().includes(query) ||
+      (patient.profile?.bloodGroup || '').toLowerCase().includes(query)
+    );
+  });
+
+  const getPatientRiskCategory = (patient) => {
+    const conditionCount = patient?.profile?.conditions?.length || 0;
+    const allergyCount = patient?.profile?.allergies?.length || 0;
+    if (conditionCount + allergyCount >= 3) return 'High Risk';
+    if (conditionCount + allergyCount >= 1) return 'Monitor';
+    return 'Stable';
+  };
+  function hasPrescriptionForAppointment(appointmentId) {
+    return myPrescriptions.some((prescription) => prescription.appointmentId === appointmentId);
+  }
+
+  function isVideoAppointment(appointment) {
+    return (appointment?.type || '').toString().trim().toLowerCase() === 'video';
+  }
+  const matchesAppointmentFilters = (appointment) => {
+    const patient = getUserById(appointment.patientId);
+    const query = appointmentSearchQuery.trim().toLowerCase();
+
+    if (appointmentTypeFilter !== 'all' && (appointment.type || '').toLowerCase() !== appointmentTypeFilter) {
+      return false;
+    }
+
+    if (appointmentStatusFilter !== 'all' && (appointment.status || '').toLowerCase() !== appointmentStatusFilter) {
+      return false;
+    }
+
+    if (!query) {
+      return true;
+    }
+
+    const haystack = [
+      patient?.name || '',
+      patient?.email || '',
+      patient?.phone || '',
+      appointment?.symptoms || '',
+      appointment?.date || '',
+      appointment?.time || '',
+      appointment?.type || '',
+      appointment?.status || '',
+    ]
+      .join(' ')
+      .toLowerCase();
+
+    return haystack.includes(query);
+  };
+  const filteredPendingRequests = pendingRequests.filter(matchesAppointmentFilters);
+  const filteredTodayAppointments = todayAppointments.filter(matchesAppointmentFilters);
+  const filteredUpcomingAppointments = upcomingAppointments.filter(matchesAppointmentFilters);
+  const filteredCompletedAppointments = completedAppointments.filter(matchesAppointmentFilters);
+
+  const getSortedVideoAppointments = () => {
+    const joinableStatuses = new Set(['confirmed', 'rescheduled', 'pending']);
+    return [...todayAppointments, ...upcomingAppointments]
+      .filter((apt, idx, arr) => arr.findIndex((x) => x.id === apt.id) === idx)
+      .filter((apt) => isVideoAppointment(apt) && joinableStatuses.has((apt.status || '').toLowerCase()))
+      .sort((a, b) => new Date(`${a.date} ${a.time}`) - new Date(`${b.date} ${b.time}`));
+  };
+  const nextVideoConsultation = getSortedVideoAppointments()[0] || null;
+
+  const getVisibleAppointments = () => {
+    if (activeAppointmentTab === 'pending') return filteredPendingRequests;
+    if (activeAppointmentTab === 'today') return filteredTodayAppointments;
+    if (activeAppointmentTab === 'upcoming') return filteredUpcomingAppointments;
+    return filteredCompletedAppointments;
+  };
+
+  const handleExportVisibleAppointments = () => {
+    const visibleAppointments = getVisibleAppointments();
+    if (visibleAppointments.length === 0) {
+      alert('No appointments to export for the current view.');
+      return;
+    }
+
+    const csvLines = [
+      ['Appointment ID', 'Patient Name', 'Patient Phone', 'Patient Email', 'Date', 'Time', 'Type', 'Status', 'Symptoms'].join(','),
+      ...visibleAppointments.map((apt) => {
+        const patient = getUserById(apt.patientId);
+        const row = [
+          apt.id,
+          patient?.name || '',
+          patient?.phone || '',
+          patient?.email || '',
+          apt.date || '',
+          apt.time || '',
+          apt.type || '',
+          apt.status || '',
+          (apt.symptoms || '').replace(/\n/g, ' ').replace(/,/g, ';'),
+        ];
+        return row.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(',');
+      }),
+    ];
+
+    const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `doctor-appointments-${activeAppointmentTab}-${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleContactPatient = (appointment, channel) => {
+    const patient = getUserById(appointment.patientId);
+    if (channel === 'phone') {
+      if (!patient?.phone) {
+        alert('Patient phone number is not available.');
+        return;
+      }
+      window.open(`tel:${patient.phone}`, '_self');
+      return;
+    }
+
+    if (!patient?.email) {
+      alert('Patient email is not available.');
+      return;
+    }
+
+    const subject = encodeURIComponent(`MediConnect Consultation Follow-up (Appointment #${appointment.id})`);
+    const body = encodeURIComponent(`Hello ${patient.name || 'Patient'},\n\nThis is regarding your appointment on ${appointment.date} at ${appointment.time}.\n\nRegards,\nDr. ${currentUser.name}`);
+    window.open(`mailto:${patient.email}?subject=${subject}&body=${body}`, '_self');
+  };
+  const formatInr = (amount) => new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    maximumFractionDigits: 0,
+  }).format(Number(amount || 0));
 
   // Handle accept appointment
   const handleAccept = (appointmentId) => {
@@ -108,6 +383,48 @@ const DoctorDashboard = () => {
     setShowConsultationModal(true);
   };
 
+  const handleJoinVideoCall = async (appointment) => {
+    try {
+      const meetingLink = await getAppointmentMeetingLink(appointment.id);
+      if (!meetingLink) {
+        alert('Unable to start the video call. Please try again.');
+        return;
+      }
+      setSelectedAppointment(appointment);
+      setVideoCallUrl(meetingLink);
+      setShowVideoCallModal(true);
+    } catch (error) {
+      alert(error.message || 'Unable to start the video call. Please try again.');
+    }
+  };
+
+  const handleCopyVideoCallLink = async (appointment) => {
+    try {
+      const meetingLink = await getAppointmentMeetingLink(appointment.id);
+      if (!meetingLink) {
+        alert('Unable to copy the video call link. Please try again.');
+        return;
+      }
+
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(meetingLink);
+      } else {
+        window.prompt('Copy this video call link', meetingLink);
+      }
+
+      setCopiedVideoCallLink(meetingLink);
+      window.setTimeout(() => setCopiedVideoCallLink(''), 2000);
+    } catch (error) {
+      alert(error.message || 'Unable to copy the video call link. Please try again.');
+    }
+  };
+
+  const handleCloseVideoCall = () => {
+    setShowVideoCallModal(false);
+    setVideoCallUrl('');
+    setCopiedVideoCallLink('');
+  };
+
   // View patient records
   const handleViewPatientRecords = (patientId) => {
     const patient = getUserById(patientId);
@@ -117,12 +434,31 @@ const DoctorDashboard = () => {
   };
 
   // Complete consultation
-  const handleCompleteConsultation = () => {
+  const handleCompleteConsultation = async () => {
     if (!diagnosis) {
       alert('Please enter a diagnosis');
       return;
     }
-    completeConsultation(selectedAppointment.id, consultationNotes, diagnosis);
+
+    await completeConsultation(selectedAppointment.id, consultationNotes, diagnosis);
+
+    let suggestedMedicines = [{ name: '', dosage: '', frequency: '', duration: '', instructions: '' }];
+    try {
+      const apiSuggestions = await getPrescriptionSuggestions(selectedAppointment.symptoms);
+      if (Array.isArray(apiSuggestions) && apiSuggestions.length > 0) {
+        suggestedMedicines = apiSuggestions;
+      }
+    } catch {
+      // Keep fallback row if suggestion API fails.
+    }
+
+    setPrescriptionData({
+      medicines: suggestedMedicines,
+      notes: consultationNotes,
+      diagnosis,
+      followUpDate: ''
+    });
+
     setShowConsultationModal(false);
     setShowPrescriptionModal(true);
   };
@@ -149,30 +485,46 @@ const DoctorDashboard = () => {
   };
 
   // Save prescription
-  const handleSavePrescription = () => {
+  const handleSavePrescription = async () => {
     const validMedicines = prescriptionData.medicines.filter(m => m.name && m.dosage);
     if (validMedicines.length === 0) {
       alert('Please add at least one medicine');
       return;
     }
 
-    addPrescription(
-      selectedAppointment.id,
-      selectedAppointment.patientId,
-      currentUser.id,
-      validMedicines,
-      prescriptionData.notes,
-      diagnosis || prescriptionData.diagnosis
-    );
+    try {
+      await addPrescription(
+        selectedAppointment.id,
+        selectedAppointment.patientId,
+        currentUser.id,
+        validMedicines,
+        prescriptionData.notes,
+        diagnosis || prescriptionData.diagnosis
+      );
 
-    setShowPrescriptionModal(false);
+      setShowPrescriptionModal(false);
+      setPrescriptionData({
+        medicines: [{ name: '', dosage: '', frequency: '', duration: '', instructions: '' }],
+        notes: '',
+        diagnosis: '',
+        followUpDate: ''
+      });
+      alert('Prescription saved and sent to patient!');
+    } catch (error) {
+      alert(error.message || 'Unable to save prescription. Please try again.');
+    }
+  };
+
+  const handleOpenPrescriptionEditor = (appointment) => {
+    setSelectedAppointment(appointment);
+    setDiagnosis(appointment?.diagnosis || '');
     setPrescriptionData({
       medicines: [{ name: '', dosage: '', frequency: '', duration: '', instructions: '' }],
-      notes: '',
-      diagnosis: '',
+      notes: appointment?.notes || '',
+      diagnosis: appointment?.diagnosis || '',
       followUpDate: ''
     });
-    alert('Prescription saved and sent to patient!');
+    setShowPrescriptionModal(true);
   };
 
   // Skip prescription
@@ -220,17 +572,73 @@ const DoctorDashboard = () => {
     return getHealthRecordsByPatient(selectedPatient.id);
   };
 
+  const handleAddLabReportForPatient = async () => {
+    if (!selectedPatient) {
+      return;
+    }
+
+    const name = prompt('Lab test name (e.g., Complete Blood Count)');
+    if (!name) return;
+
+    const type = prompt('Test type (e.g., Blood Test, Urine Test, X-Ray)', 'Blood Test');
+    if (!type) return;
+
+    const date = prompt('Report date (YYYY-MM-DD)', new Date().toISOString().split('T')[0]);
+    if (!date) return;
+
+    const lab = prompt('Lab/Center name', 'MediConnect Lab');
+    if (!lab) return;
+
+    const status = prompt('Status (Completed/Pending)', 'Completed') || 'Completed';
+    const rawResults = prompt('Results (optional). Format: key:value,key:value', 'hemoglobin:14.2,wbc:7500');
+
+    const results = {};
+    if (rawResults && rawResults.trim()) {
+      rawResults.split(',').forEach((entry) => {
+        const [key, ...valueParts] = entry.split(':');
+        const k = (key || '').trim();
+        const v = (valueParts.join(':') || '').trim();
+        if (k && v) {
+          results[k] = v;
+        }
+      });
+    }
+
+    try {
+      await addLabReport(selectedPatient.id, {
+        name,
+        type,
+        date,
+        doctor: currentUser.name,
+        lab,
+        status,
+        results,
+      });
+      alert('Lab report added successfully. It is now visible in the patient dashboard.');
+    } catch (error) {
+      alert(error.message || 'Unable to add lab report. Please try again.');
+    }
+  };
+
   return (
-    <div className="doctor-dashboard">
+    <div className="doctor-dashboard doctor-dashboard-pro">
       {/* Header */}
       <div className="dashboard-header">
         <div className="greeting">
-          <h1>Good {new Date().getHours() < 12 ? 'Morning' : new Date().getHours() < 17 ? 'Afternoon' : 'Evening'}, Dr. {currentUser.name.split(' ').pop()} 👋</h1>
+          <h1>{t('Good')} {new Date().getHours() < 12 ? t('Morning') : new Date().getHours() < 17 ? t('Afternoon') : t('Evening')}, Dr. {currentUser.name.split(' ').pop()}</h1>
           <p>{doctorProfile?.specialization} • {doctorProfile?.location}</p>
         </div>
         <div className="header-actions">
+          <label className="patient-language-select">
+            <span>{t('Choose Language')}</span>
+            <select value={selectedLanguage} onChange={(e) => setSelectedLanguage(e.target.value)}>
+              {languageOptions.map((lang) => (
+                <option key={lang} value={lang}>{lang}</option>
+              ))}
+            </select>
+          </label>
           <div className="notification-bell" onClick={() => setShowNotifications(!showNotifications)}>
-            <span className="bell-icon">🔔</span>
+            <span className="bell-icon">Alerts</span>
             {unreadCount > 0 && <span className="notification-badge">{unreadCount}</span>}
           </div>
           <div className="user-avatar doctor-avatar">
@@ -243,16 +651,16 @@ const DoctorDashboard = () => {
       {showNotifications && (
         <div className="notifications-dropdown">
           <div className="notifications-header">
-            <h3>Notifications</h3>
+            <h3>{t('Notifications')}</h3>
             {unreadCount > 0 && (
               <button onClick={() => markAllNotificationsAsRead(currentUser.id)}>
-                Mark all read
+                {t('Mark all read')}
               </button>
             )}
           </div>
           <div className="notifications-list">
             {notifications.length === 0 ? (
-              <div className="empty-notifications">No notifications</div>
+              <div className="empty-notifications">{t('No notifications')}</div>
             ) : (
               notifications.slice(0, 5).map(notification => (
                 <div 
@@ -285,42 +693,74 @@ const DoctorDashboard = () => {
           className={`nav-tab ${activeSection === 'dashboard' ? 'active' : ''}`}
           onClick={() => handleSectionChange('dashboard')}
         >
-          <span>🏠</span> Dashboard
+          {t('Dashboard')}
         </button>
         <button 
           className={`nav-tab ${activeSection === 'appointments' ? 'active' : ''}`}
           onClick={() => handleSectionChange('appointments')}
         >
-          <span>📅</span> Appointments
+          {t('Appointments')}
         </button>
         <button 
           className={`nav-tab ${activeSection === 'patients' ? 'active' : ''}`}
           onClick={() => handleSectionChange('patients')}
         >
-          <span>👥</span> Patients
+          {t('Patients')}
         </button>
         <button 
           className={`nav-tab ${activeSection === 'prescriptions' ? 'active' : ''}`}
           onClick={() => handleSectionChange('prescriptions')}
         >
-          <span>💊</span> Prescriptions
+          {t('Prescriptions')}
         </button>
         <button 
           className={`nav-tab ${activeSection === 'schedule' ? 'active' : ''}`}
           onClick={() => handleSectionChange('schedule')}
         >
-          <span>📆</span> Schedule
+          {t('Schedule')}
         </button>
         <button 
           className={`nav-tab ${activeSection === 'settings' ? 'active' : ''}`}
           onClick={() => handleSectionChange('settings')}
         >
-          <span>⚙️</span> Settings
+          {t('Settings')}
         </button>
       </div>
 
       {/* Main Content */}
       <div className="dashboard-content">
+
+        <div className="doctor-executive-hero">
+          <div className="doctor-executive-left">
+            <div className="doctor-executive-badge">Doctor Operations Console</div>
+            <h2>Clinical Command Center</h2>
+            <p>
+              Monitor appointments, prioritize high-risk cases, and close consultations with structured outputs.
+            </p>
+            <div className="doctor-executive-actions">
+              <button className="btn-primary" onClick={() => { handleSectionChange('appointments'); setActiveAppointmentTab('today'); }}>
+                Open Today Queue
+              </button>
+              <button className="btn-secondary" onClick={() => handleSectionChange('patients')}>
+                Review Patient Charts
+              </button>
+            </div>
+          </div>
+          <div className="doctor-executive-right">
+            <div className="doctor-exec-metric">
+              <span>Weekly volume</span>
+              <strong>{totalPlannedConsults}</strong>
+            </div>
+            <div className="doctor-exec-metric">
+              <span>Avg utilization</span>
+              <strong>{avgCapacityUtilization}%</strong>
+            </div>
+            <div className="doctor-exec-metric">
+              <span>Consult mix</span>
+              <strong>{consultMixVideoCount} video / {consultMixClinicCount} clinic</strong>
+            </div>
+          </div>
+        </div>
 
         {/* ==================== DASHBOARD HOME ==================== */}
         {activeSection === 'dashboard' && (
@@ -328,33 +768,262 @@ const DoctorDashboard = () => {
             {/* Stats Row */}
             <div className="stats-grid">
               <div className="stat-card stat-primary">
-                <div className="stat-icon">📅</div>
+                <div className="stat-icon stat-icon-text">TD</div>
                 <div className="stat-info">
                   <div className="stat-value">{todayAppointments.length}</div>
                   <div className="stat-label">Today's Appointments</div>
                 </div>
               </div>
               <div className="stat-card stat-warning">
-                <div className="stat-icon">⏳</div>
+                <div className="stat-icon stat-icon-text">PQ</div>
                 <div className="stat-info">
                   <div className="stat-value">{pendingRequests.length}</div>
                   <div className="stat-label">Pending Requests</div>
                 </div>
               </div>
               <div className="stat-card stat-info">
-                <div className="stat-icon">📋</div>
+                <div className="stat-icon stat-icon-text">UP</div>
                 <div className="stat-info">
                   <div className="stat-value">{upcomingAppointments.length}</div>
                   <div className="stat-label">Upcoming</div>
                 </div>
               </div>
               <div className="stat-card stat-success">
-                <div className="stat-icon">👥</div>
+                <div className="stat-icon stat-icon-text">PT</div>
                 <div className="stat-info">
                   <div className="stat-value">{myPatients.length}</div>
                   <div className="stat-label">Total Patients</div>
                 </div>
               </div>
+            </div>
+
+            <div className="doctor-pro-insights">
+              <div className="pro-insight-card">
+                <h3>Clinical Throughput</h3>
+                <div className="pro-insight-value">{completionRate}%</div>
+                <p>{completedToday} completed from today's schedule</p>
+              </div>
+              <div className="pro-insight-card">
+                <h3>Revenue Pulse</h3>
+                <div className="pro-insight-value">{formatInr(estimatedTodayRevenue)}</div>
+                <p>Avg consult fee {formatInr(avgConsultationFee)}</p>
+              </div>
+              <div className="pro-insight-card">
+                <h3>Response SLA</h3>
+                <div className={`pro-insight-value ${responseSla === 'Critical' ? 'danger' : responseSla === 'Needs Attention' ? 'warning' : 'ok'}`}>{responseSla}</div>
+                <p>{pendingRequests.length} pending request(s)</p>
+              </div>
+            </div>
+
+            <div className="doctor-ops-grid">
+              <div className="doctor-capacity-panel">
+                <div className="doctor-panel-header">
+                  <h2>Weekly Capacity Planner</h2>
+                  <span>Target: {dailyCapacityTarget} consults/day</span>
+                </div>
+                <div className="capacity-list">
+                  {weeklyCapacityPlan.map((slot) => (
+                    <div key={slot.date} className="capacity-row">
+                      <div className="capacity-day">{slot.label}</div>
+                      <div className="capacity-track">
+                        <div className="capacity-fill" style={{ width: `${slot.utilization}%` }} />
+                      </div>
+                      <div className="capacity-meta">
+                        <strong>{slot.appointmentsCount}</strong>
+                        <span>{slot.freeSlots} free</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="doctor-risk-panel">
+                <div className="doctor-panel-header">
+                  <h2>Clinical Risk Watchlist</h2>
+                  <span>{highRiskPatients.length} patients flagged</span>
+                </div>
+                {highRiskPatients.length === 0 ? (
+                  <div className="doctor-panel-empty">No high-risk patients right now.</div>
+                ) : (
+                  <div className="risk-list">
+                    {highRiskPatients.map(({ patient, riskScore }) => (
+                      <div key={patient.id} className="risk-item">
+                        <div>
+                          <strong>{patient.name}</strong>
+                          <p>{patient.profile?.age || 'N/A'} yrs • {patient.profile?.bloodGroup || 'Blood group N/A'}</p>
+                        </div>
+                        <div className="risk-actions">
+                          <span className="risk-score">Risk {riskScore}</span>
+                          <button className="btn-view-record" onClick={() => handleViewPatientRecords(patient.id)}>
+                            Open Chart
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="doctor-ops-grid secondary">
+              <div className="doctor-followup-panel">
+                <div className="doctor-panel-header">
+                  <h2>Follow-up Tracker</h2>
+                  <span>{followUpQueue.length} pending write-ups</span>
+                </div>
+                {followUpQueue.length === 0 ? (
+                  <div className="doctor-panel-empty">All completed visits have prescription notes.</div>
+                ) : (
+                  <div className="followup-list">
+                    {followUpQueue.map((apt) => {
+                      const patient = getUserById(apt.patientId);
+                      return (
+                        <div key={apt.id} className="followup-item">
+                          <div>
+                            <strong>{patient?.name || 'Patient'}</strong>
+                            <p>{apt.date} • {apt.time} • {apt.type}</p>
+                          </div>
+                          <button className="btn-view-record" onClick={() => handleOpenPrescriptionEditor(apt)}>
+                            Write Prescription
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              <div className="doctor-symptom-panel">
+                <div className="doctor-panel-header">
+                  <h2>Symptom Intelligence</h2>
+                  <span>From active queue</span>
+                </div>
+                {topSymptoms.length === 0 ? (
+                  <div className="doctor-panel-empty">No symptom data yet for trend analysis.</div>
+                ) : (
+                  <div className="symptom-chips">
+                    {topSymptoms.map(([symptom, count]) => (
+                      <div key={symptom} className="symptom-chip">
+                        <span>{symptom}</span>
+                        <strong>{count}</strong>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="doctor-service-portfolio">
+              <div className="doctor-panel-header">
+                <h2>Clinical Service Portfolio</h2>
+                <span>Modeled for high-trust telehealth operations</span>
+              </div>
+              <div className="doctor-service-grid">
+                {carePrograms.map((program) => (
+                  <article key={program.id} className="doctor-service-card">
+                    <h3>{program.title}</h3>
+                    <p>{program.description}</p>
+                    <span>{program.metric}</span>
+                  </article>
+                ))}
+              </div>
+            </div>
+
+            <div className="doctor-brand-trust-grid">
+              <div className="doctor-trust-panel">
+                <div className="doctor-panel-header">
+                  <h2>Trust and Compliance Signals</h2>
+                  <span>Professional care indicators</span>
+                </div>
+                <ul className="doctor-trust-list">
+                  {trustSignals.map((signal) => (
+                    <li key={signal}>{signal}</li>
+                  ))}
+                </ul>
+              </div>
+              <div className="doctor-experience-panel">
+                <div className="doctor-panel-header">
+                  <h2>Patient Experience Summary</h2>
+                  <span>Live dashboard signals</span>
+                </div>
+                <div className="doctor-experience-list">
+                  {patientExperienceNotes.map((item) => (
+                    <div key={item.title} className="doctor-experience-item">
+                      <strong>{item.title}</strong>
+                      <p>{item.note}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="doctor-live-command-center">
+              <div className="doctor-live-command-header">
+                <h2>Live Consultation Command Center</h2>
+                <span>Real-time from your appointment queue</span>
+              </div>
+              {nextVideoConsultation ? (
+                <div className="doctor-live-command-card">
+                  <div>
+                    <strong>Next video consult</strong>
+                    <p>
+                      Appointment #{nextVideoConsultation.id} • {nextVideoConsultation.date} • {nextVideoConsultation.time}
+                    </p>
+                  </div>
+                  <div className="doctor-live-command-actions">
+                    <button className="btn-start-consult" onClick={() => handleJoinVideoCall(nextVideoConsultation)}>
+                      Join Room
+                    </button>
+                    <button className="btn-view-record" onClick={() => handleCopyVideoCallLink(nextVideoConsultation)}>
+                      Copy Invite Link
+                    </button>
+                    <button className="btn-view-record" onClick={() => handleSectionChange('appointments')}>
+                      Open Appointments
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="empty-state small">
+                  <span className="empty-icon">📹</span>
+                  <h3>No upcoming video consultations</h3>
+                  <p>Video sessions appear here as soon as appointments are available.</p>
+                </div>
+              )}
+            </div>
+
+            <div className="doctor-priority-queue">
+              <div className="priority-header">
+                <h2>Priority Consultation Queue</h2>
+                <span>Top {priorityQueue.length} items</span>
+              </div>
+              {priorityQueue.length === 0 ? (
+                <div className="empty-state small">
+                  <span className="empty-icon">✅</span>
+                  <h3>Queue is clear</h3>
+                  <p>No pending or immediate consultations</p>
+                </div>
+              ) : (
+                <div className="priority-list">
+                  {priorityQueue.map((apt) => {
+                    const patient = getUserById(apt.patientId);
+                    return (
+                      <div key={apt.id} className="priority-item">
+                        <div className="priority-main">
+                          <strong>{patient?.name}</strong>
+                          <p>{apt.date} • {apt.time} • {apt.type}</p>
+                        </div>
+                        <div className="priority-actions">
+                          {apt.status === 'Pending' ? (
+                            <button className="btn-accept" onClick={() => handleAccept(apt.id)}>Accept</button>
+                          ) : (
+                            <button className="btn-start" onClick={() => (isVideoAppointment(apt) ? handleJoinVideoCall(apt) : handleStartConsultation(apt))}>Start</button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Quick Actions */}
@@ -398,7 +1067,7 @@ const DoctorDashboard = () => {
                         <div className="schedule-time">
                           <span className="time">{apt.time}</span>
                           <span className={`type-badge ${apt.type.toLowerCase()}`}>
-                            {apt.type === 'Video' ? '📹' : '🏥'} {apt.type}
+                            {isVideoAppointment(apt) ? '📹' : '🏥'} {apt.type}
                           </span>
                         </div>
                         <div className="schedule-patient">
@@ -413,8 +1082,8 @@ const DoctorDashboard = () => {
                           <p>{apt.symptoms}</p>
                         </div>
                         <div className="schedule-actions">
-                          <button className="btn-start" onClick={() => handleStartConsultation(apt)}>
-                            {apt.type === 'Video' ? '📹 Join' : '🩺 Start'}
+                          <button className="btn-start" onClick={() => (isVideoAppointment(apt) ? handleJoinVideoCall(apt) : handleStartConsultation(apt))}>
+                            {isVideoAppointment(apt) ? '📹 Join' : '🩺 Start'}
                           </button>
                           <button className="btn-record" onClick={() => handleViewPatientRecords(apt.patientId)}>
                             📋 Records
@@ -464,6 +1133,42 @@ const DoctorDashboard = () => {
         {/* ==================== APPOINTMENTS SECTION ==================== */}
         {activeSection === 'appointments' && (
           <div className="section-appointments">
+            <div className="doctor-appointment-toolbar">
+              <div className="doctor-appointment-toolbar-left">
+                <input
+                  type="text"
+                  value={appointmentSearchQuery}
+                  onChange={(e) => setAppointmentSearchQuery(e.target.value)}
+                  className="doctor-appointment-search"
+                  placeholder="Search by patient, phone, email, date or symptoms"
+                />
+                <select
+                  value={appointmentTypeFilter}
+                  onChange={(e) => setAppointmentTypeFilter(e.target.value)}
+                  className="doctor-appointment-filter"
+                >
+                  <option value="all">All Types</option>
+                  <option value="video">Video</option>
+                  <option value="clinic">Clinic</option>
+                </select>
+                <select
+                  value={appointmentStatusFilter}
+                  onChange={(e) => setAppointmentStatusFilter(e.target.value)}
+                  className="doctor-appointment-filter"
+                >
+                  <option value="all">All Statuses</option>
+                  <option value="pending">Pending</option>
+                  <option value="confirmed">Confirmed</option>
+                  <option value="rescheduled">Rescheduled</option>
+                  <option value="completed">Completed</option>
+                  <option value="cancelled">Cancelled</option>
+                  <option value="rejected">Rejected</option>
+                </select>
+              </div>
+              <button className="btn-view-record" onClick={handleExportVisibleAppointments}>
+                ⬇ Export Visible CSV
+              </button>
+            </div>
             <div className="appointments-tabs">
               <button 
                 className={`apt-tab ${activeAppointmentTab === 'pending' ? 'active' : ''}`}
@@ -494,15 +1199,15 @@ const DoctorDashboard = () => {
             {/* Pending Requests Tab */}
             {activeAppointmentTab === 'pending' && (
               <div className="appointments-content">
-                {pendingRequests.length === 0 ? (
+                {filteredPendingRequests.length === 0 ? (
                   <div className="empty-state">
                     <span className="empty-icon">✅</span>
                     <h3>No Pending Requests</h3>
-                    <p>All appointment requests have been processed</p>
+                    <p>No matching pending appointments for current filters</p>
                   </div>
                 ) : (
                   <div className="appointment-list">
-                    {pendingRequests.map(apt => {
+                    {filteredPendingRequests.map(apt => {
                       const patient = getUserById(apt.patientId);
                       return (
                         <div key={apt.id} className="doctor-apt-card pending">
@@ -521,7 +1226,7 @@ const DoctorDashboard = () => {
                               <span>⏰</span> {apt.time}
                             </div>
                             <div className={`type ${apt.type.toLowerCase()}`}>
-                              {apt.type === 'Video' ? '📹' : '🏥'} {apt.type}
+                              {isVideoAppointment(apt) ? '📹' : '🏥'} {apt.type}
                             </div>
                           </div>
                           <div className="apt-symptoms">
@@ -535,8 +1240,19 @@ const DoctorDashboard = () => {
                             <button className="btn-reject-lg" onClick={() => handleReject(apt.id)}>
                               <span>✕</span> Decline
                             </button>
+                            {isVideoAppointment(apt) && (
+                              <button className="btn-view-record" onClick={() => handleJoinVideoCall(apt)}>
+                                📹 Open Video Call
+                              </button>
+                            )}
                             <button className="btn-view-record" onClick={() => handleViewPatientRecords(apt.patientId)}>
                               📋 View Records
+                            </button>
+                            <button className="btn-view-record" onClick={() => handleContactPatient(apt, 'phone')}>
+                              📞 Call
+                            </button>
+                            <button className="btn-view-record" onClick={() => handleContactPatient(apt, 'email')}>
+                              ✉ Email
                             </button>
                           </div>
                         </div>
@@ -550,15 +1266,15 @@ const DoctorDashboard = () => {
             {/* Today's Appointments Tab */}
             {activeAppointmentTab === 'today' && (
               <div className="appointments-content">
-                {todayAppointments.length === 0 ? (
+                {filteredTodayAppointments.length === 0 ? (
                   <div className="empty-state">
                     <span className="empty-icon">😊</span>
                     <h3>No Appointments Today</h3>
-                    <p>Enjoy your free day!</p>
+                    <p>No matching appointments for current filters</p>
                   </div>
                 ) : (
                   <div className="appointment-list">
-                    {todayAppointments.map(apt => {
+                    {filteredTodayAppointments.map(apt => {
                       const patient = getUserById(apt.patientId);
                       return (
                         <div key={apt.id} className="doctor-apt-card today">
@@ -572,7 +1288,7 @@ const DoctorDashboard = () => {
                           <div className="apt-datetime">
                             <div className="time large">{apt.time}</div>
                             <div className={`type ${apt.type.toLowerCase()}`}>
-                              {apt.type === 'Video' ? '📹' : '🏥'} {apt.type}
+                              {isVideoAppointment(apt) ? '📹' : '🏥'} {apt.type}
                             </div>
                             <div className={`status status-${apt.status.toLowerCase()}`}>{apt.status}</div>
                           </div>
@@ -581,11 +1297,27 @@ const DoctorDashboard = () => {
                             <p>{apt.symptoms}</p>
                           </div>
                           <div className="apt-card-actions">
-                            <button className="btn-start-consult" onClick={() => handleStartConsultation(apt)}>
-                              {apt.type === 'Video' ? '📹 Join Video Call' : '🩺 Start Consultation'}
+                            <button className="btn-start-consult" onClick={() => (isVideoAppointment(apt) ? handleJoinVideoCall(apt) : handleStartConsultation(apt))}>
+                              {isVideoAppointment(apt) ? '📹 Join Video Call' : '🩺 Start Consultation'}
                             </button>
+                            {isVideoAppointment(apt) && (
+                              <button className="btn-view-record" onClick={() => handleCopyVideoCallLink(apt)}>
+                                📋 Copy Link
+                              </button>
+                            )}
+                            {!hasPrescriptionForAppointment(apt.id) && (
+                              <button className="btn-view-record" onClick={() => handleOpenPrescriptionEditor(apt)}>
+                                💊 Write Prescription
+                              </button>
+                            )}
                             <button className="btn-view-record" onClick={() => handleViewPatientRecords(apt.patientId)}>
                               📋 Records
+                            </button>
+                            <button className="btn-view-record" onClick={() => handleContactPatient(apt, 'phone')}>
+                              📞 Call
+                            </button>
+                            <button className="btn-view-record" onClick={() => handleContactPatient(apt, 'email')}>
+                              ✉ Email
                             </button>
                           </div>
                         </div>
@@ -599,15 +1331,15 @@ const DoctorDashboard = () => {
             {/* Upcoming Appointments Tab */}
             {activeAppointmentTab === 'upcoming' && (
               <div className="appointments-content">
-                {upcomingAppointments.length === 0 ? (
+                {filteredUpcomingAppointments.length === 0 ? (
                   <div className="empty-state">
                     <span className="empty-icon">📭</span>
                     <h3>No Upcoming Appointments</h3>
-                    <p>You have no scheduled appointments</p>
+                    <p>No matching appointments for current filters</p>
                   </div>
                 ) : (
                   <div className="appointment-list">
-                    {upcomingAppointments.map(apt => {
+                    {filteredUpcomingAppointments.map(apt => {
                       const patient = getUserById(apt.patientId);
                       return (
                         <div key={apt.id} className="doctor-apt-card upcoming">
@@ -626,7 +1358,7 @@ const DoctorDashboard = () => {
                               <span>⏰</span> {apt.time}
                             </div>
                             <div className={`type ${apt.type.toLowerCase()}`}>
-                              {apt.type === 'Video' ? '📹' : '🏥'} {apt.type}
+                              {isVideoAppointment(apt) ? '📹' : '🏥'} {apt.type}
                             </div>
                           </div>
                           <div className="apt-symptoms">
@@ -634,8 +1366,24 @@ const DoctorDashboard = () => {
                             <p>{apt.symptoms}</p>
                           </div>
                           <div className="apt-card-actions">
+                            {isVideoAppointment(apt) && (
+                              <button className="btn-start-consult" onClick={() => handleJoinVideoCall(apt)}>
+                                📹 Open Video Call
+                              </button>
+                            )}
+                            {!hasPrescriptionForAppointment(apt.id) && (
+                              <button className="btn-view-record" onClick={() => handleOpenPrescriptionEditor(apt)}>
+                                💊 Write Prescription
+                              </button>
+                            )}
                             <button className="btn-view-record" onClick={() => handleViewPatientRecords(apt.patientId)}>
                               📋 View Patient Records
+                            </button>
+                            <button className="btn-view-record" onClick={() => handleContactPatient(apt, 'phone')}>
+                              📞 Call
+                            </button>
+                            <button className="btn-view-record" onClick={() => handleContactPatient(apt, 'email')}>
+                              ✉ Email
                             </button>
                           </div>
                         </div>
@@ -649,15 +1397,15 @@ const DoctorDashboard = () => {
             {/* Completed Appointments Tab */}
             {activeAppointmentTab === 'completed' && (
               <div className="appointments-content">
-                {completedAppointments.length === 0 ? (
+                {filteredCompletedAppointments.length === 0 ? (
                   <div className="empty-state">
                     <span className="empty-icon">📋</span>
                     <h3>No Completed Appointments</h3>
-                    <p>Your completed consultations will appear here</p>
+                    <p>No matching appointments for current filters</p>
                   </div>
                 ) : (
                   <div className="appointment-list">
-                    {completedAppointments.slice(0, 10).map(apt => {
+                    {filteredCompletedAppointments.slice(0, 10).map(apt => {
                       const patient = getUserById(apt.patientId);
                       return (
                         <div key={apt.id} className="doctor-apt-card completed">
@@ -679,6 +1427,11 @@ const DoctorDashboard = () => {
                             )}
                           </div>
                           <div className="apt-card-actions">
+                            {!hasPrescriptionForAppointment(apt.id) && (
+                              <button className="btn-view-record" onClick={() => handleOpenPrescriptionEditor(apt)}>
+                                💊 Write Prescription
+                              </button>
+                            )}
                             <button className="btn-view-record" onClick={() => handleViewPatientRecords(apt.patientId)}>
                               📋 View Records
                             </button>
@@ -696,18 +1449,28 @@ const DoctorDashboard = () => {
         {/* ==================== PATIENTS SECTION ==================== */}
         {activeSection === 'patients' && (
           <div className="section-patients">
-            <h2>👥 My Patients ({myPatients.length})</h2>
-            {myPatients.length === 0 ? (
+            <div className="doctor-patient-toolbar">
+              <h2>👥 My Patients ({filteredPatients.length})</h2>
+              <input
+                type="text"
+                className="doctor-patient-search"
+                placeholder="Search by name, email, phone or blood group"
+                value={patientSearchQuery}
+                onChange={(e) => setPatientSearchQuery(e.target.value)}
+              />
+            </div>
+            {filteredPatients.length === 0 ? (
               <div className="empty-state">
                 <span className="empty-icon">👥</span>
-                <h3>No Patients Yet</h3>
-                <p>Your patients will appear here after appointments</p>
+                <h3>No matching patients</h3>
+                <p>Try a different search keyword</p>
               </div>
             ) : (
               <div className="patients-grid">
-                {myPatients.map(patient => {
+                {filteredPatients.map(patient => {
                   const patientAppointments = getPatientHistoryForDoctor(currentUser.id, patient.id);
                   const lastVisit = patientAppointments[0];
+                  const riskCategory = getPatientRiskCategory(patient);
                   return (
                     <div key={patient.id} className="patient-card" onClick={() => handleViewPatientRecords(patient.id)}>
                       <div className="patient-card-header">
@@ -716,6 +1479,9 @@ const DoctorDashboard = () => {
                           <h3>{patient.name}</h3>
                           <p>{patient.profile?.age} yrs • {patient.profile?.gender}</p>
                         </div>
+                        <span className={`patient-risk-badge ${riskCategory === 'High Risk' ? 'high' : riskCategory === 'Monitor' ? 'monitor' : 'stable'}`}>
+                          {riskCategory}
+                        </span>
                       </div>
                       <div className="patient-card-body">
                         <div className="info-row">
@@ -873,7 +1639,7 @@ const DoctorDashboard = () => {
                   </div>
                   <div className="info-item">
                     <span className="label">Consultation Fee:</span>
-                    <span className="value">${doctorProfile?.fee}</span>
+                    <span className="value">{formatInr(doctorProfile?.fee)}</span>
                   </div>
                   <div className="info-item">
                     <span className="label">Rating:</span>
@@ -986,9 +1752,9 @@ const DoctorDashboard = () => {
                   <p>{selectedAppointment.symptoms}</p>
                 </div>
 
-                {selectedAppointment.type === 'Video' && (
+                {isVideoAppointment(selectedAppointment) && (
                   <div className="video-section">
-                    <button className="btn-video-call">
+                    <button className="btn-video-call" onClick={() => handleJoinVideoCall(selectedAppointment)}>
                       📹 Join Video Call
                     </button>
                     <p className="video-hint">Video consultation will open in a new window</p>
@@ -1222,6 +1988,11 @@ const DoctorDashboard = () => {
 
               {patientRecordTab === 'labReports' && (
                 <div className="records-list">
+                  <div style={{ marginBottom: '12px' }}>
+                    <button className="btn-view-report" onClick={handleAddLabReportForPatient}>
+                      + Add Lab Report
+                    </button>
+                  </div>
                   {getPatientLabReports().length === 0 ? (
                     <div className="empty-records">No lab reports available</div>
                   ) : (
@@ -1268,6 +2039,63 @@ const DoctorDashboard = () => {
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {showVideoCallModal && videoCallUrl && (
+        <div className="modal-overlay" onClick={handleCloseVideoCall}>
+          <div
+            className="modal"
+            style={{ maxWidth: '1100px', width: '95%', height: '85vh', display: 'flex', flexDirection: 'column', padding: 0 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', borderBottom: '1px solid #e5e7eb' }}>
+              <div>
+                <h3 style={{ margin: 0 }}>Video Consultation</h3>
+                <p style={{ margin: '4px 0 0', color: '#6b7280', fontSize: '13px' }}>
+                  {selectedAppointment ? `Appointment #${selectedAppointment.id}` : 'Live call session'}
+                </p>
+                <p style={{ margin: '4px 0 0', color: '#1d4ed8', fontSize: '12px' }}>
+                  Meeting link is auto-generated by the system for this appointment.
+                </p>
+                {copiedVideoCallLink === videoCallUrl && (
+                  <p style={{ margin: '4px 0 0', color: '#059669', fontSize: '12px' }}>
+                    Link copied for the patient.
+                  </p>
+                )}
+              </div>
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button
+                  className="btn-view-record"
+                  onClick={() => {
+                    if (navigator.clipboard?.writeText) {
+                      navigator.clipboard.writeText(videoCallUrl).then(() => setCopiedVideoCallLink(videoCallUrl)).catch(() => window.prompt('Copy this video call link', videoCallUrl));
+                    } else {
+                      window.prompt('Copy this video call link', videoCallUrl);
+                    }
+                  }}
+                >
+                  Copy Link
+                </button>
+                <button className="btn-view-record" onClick={() => window.open(videoCallUrl, '_blank', 'noopener,noreferrer')}>
+                  Open in New Tab
+                </button>
+                <button className="btn-reject" onClick={handleCloseVideoCall}>End Call</button>
+              </div>
+            </div>
+            <div className="doctor-dashboard-video-call-info">
+              <div>
+                <strong>Patient joins the same room.</strong>
+                <p>Share the link after accepting the appointment, then keep this room open for the consultation.</p>
+              </div>
+            </div>
+            <iframe
+              title="Doctor Video Consultation"
+              src={videoCallUrl}
+              allow="camera; microphone; fullscreen; display-capture; autoplay"
+              style={{ border: 0, width: '100%', height: '100%' }}
+            />
           </div>
         </div>
       )}

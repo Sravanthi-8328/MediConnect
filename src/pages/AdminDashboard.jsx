@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useAppContext } from '../context/AppContext';
+import { useLanguage } from '../context/LanguageContext';
 
 const AdminDashboard = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -27,6 +28,7 @@ const AdminDashboard = () => {
     getUnreadNotificationsCount,
     markAllNotificationsAsRead,
   } = useAppContext();
+  const { selectedLanguage, setSelectedLanguage, languageOptions, t } = useLanguage();
 
   const [activeSection, setActiveSection] = useState(searchParams.get('section') || 'dashboard');
   const [activeUserTab, setActiveUserTab] = useState('patients');
@@ -76,6 +78,83 @@ const AdminDashboard = () => {
     return verification.status !== 'Verified';
   });
 
+  const blockedUsersCount = users.filter((u) => u.isBlocked).length;
+  const activeUsersCount = users.length - blockedUsersCount;
+  const today = new Date().toISOString().split('T')[0];
+  const upcomingAppointments = appointments.filter((apt) => apt.date > today && !['Cancelled', 'Rejected'].includes(apt.status)).length;
+  const pendingAppointments = appointments.filter((apt) => apt.status === 'Pending').length;
+  const confirmedAppointments = appointments.filter((apt) => ['Confirmed', 'Accepted'].includes(apt.status)).length;
+  const inPersonAppointments = appointments.filter((apt) => (apt.type || '').toLowerCase() === 'in-person').length;
+  const videoAppointments = appointments.filter((apt) => (apt.type || '').toLowerCase() === 'video').length;
+
+  const deliveredOrders = medicineOrders.filter((o) => o.status === 'Delivered');
+  const processingOrders = medicineOrders.filter((o) => ['Processing', 'Preparing'].includes(o.status));
+  const paymentCapturedAppointments = appointments.filter((apt) => apt.paymentStatus === 'PAID').length;
+  const paymentPendingAppointments = appointments.filter((apt) => apt.paymentStatus !== 'PAID').length;
+
+  const totalConsultationRevenue = appointments
+    .filter((apt) => apt.paymentStatus === 'PAID')
+    .reduce((sum, apt) => sum + Number(apt.consultationFee || 0), 0);
+  const medicineRevenue = deliveredOrders.reduce((sum, order) => sum + Number(order.totalAmount || 0), 0);
+  const platformRevenue = totalConsultationRevenue + medicineRevenue;
+
+  const completionRate = stats.totalAppointments
+    ? Math.round((stats.completedAppointments / stats.totalAppointments) * 100)
+    : 0;
+  const verificationRate = stats.totalDoctors
+    ? Math.round(((stats.totalDoctors - pendingDoctors.length) / stats.totalDoctors) * 100)
+    : 100;
+  const paymentSuccessRate = appointments.length
+    ? Math.round((paymentCapturedAppointments / appointments.length) * 100)
+    : 0;
+
+  const systemHealthScore = Math.round(
+    (completionRate * 0.35) +
+    (verificationRate * 0.25) +
+    ((100 - Number(stats.cancellationRate || 0)) * 0.2) +
+    (paymentSuccessRate * 0.2)
+  );
+
+  const topDoctorsByLoad = doctors
+    .map((doctor) => {
+      const doctorAppointments = appointments.filter((apt) => apt.doctorId === doctor.id);
+      const doctorCompleted = doctorAppointments.filter((apt) => apt.status === 'Completed').length;
+      const doctorPending = doctorAppointments.filter((apt) => apt.status === 'Pending').length;
+      return {
+        id: doctor.id,
+        name: doctor.name,
+        specialization: doctor.specialization,
+        total: doctorAppointments.length,
+        completed: doctorCompleted,
+        pending: doctorPending,
+      };
+    })
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 5);
+
+  const recentAppointments = [...appointments]
+    .sort((a, b) => new Date(`${b.date} ${b.time || '00:00'}`) - new Date(`${a.date} ${a.time || '00:00'}`))
+    .slice(0, 6);
+
+  const recentOrders = [...allOrders]
+    .sort((a, b) => new Date(b.createdAt || b.orderDate || 0) - new Date(a.createdAt || a.orderDate || 0))
+    .slice(0, 6);
+
+  const systemAlerts = [
+    pendingDoctors.length > 0
+      ? { level: 'warning', title: 'Doctor verifications pending', value: `${pendingDoctors.length} profiles require review` }
+      : null,
+    processingOrders.length > 0
+      ? { level: 'info', title: 'Orders in fulfillment queue', value: `${processingOrders.length} medicine orders in processing` }
+      : null,
+    Number(stats.cancellationRate) > 15
+      ? { level: 'danger', title: 'Cancellation risk elevated', value: `${stats.cancellationRate}% appointment cancellation rate` }
+      : null,
+    blockedUsersCount > 0
+      ? { level: 'warning', title: 'Blocked users detected', value: `${blockedUsersCount} blocked account(s) across roles` }
+      : null,
+  ].filter(Boolean);
+
   // Handle verify doctor
   const handleVerifyDoctor = (doctorId) => {
     verifyDoctor(doctorId);
@@ -94,22 +173,35 @@ const AdminDashboard = () => {
 
   // Calculate max for chart
   const maxAppointments = Math.max(...dailyAppointments.map(d => d.count), 1);
+  const formatInr = (amount) => new Intl.NumberFormat('en-IN', {
+    style: 'currency',
+    currency: 'INR',
+    maximumFractionDigits: 0,
+  }).format(Number(amount || 0));
 
   return (
     <div className="admin-dashboard">
       {/* Header */}
       <div className="dashboard-header">
         <div className="greeting">
-          <h1>Admin Control Panel 👮</h1>
-          <p>Welcome back, {currentUser.name}. Manage and monitor the platform.</p>
+          <h1>{t('System Command Center')}</h1>
+          <p>Welcome back, {currentUser.name}. See platform health, operations, finance, and risk in one place.</p>
         </div>
         <div className="header-actions">
+          <label className="patient-language-select">
+            <span>{t('Choose Language')}</span>
+            <select value={selectedLanguage} onChange={(e) => setSelectedLanguage(e.target.value)}>
+              {languageOptions.map((lang) => (
+                <option key={lang} value={lang}>{lang}</option>
+              ))}
+            </select>
+          </label>
           <div className="notification-bell" onClick={() => setShowNotifications(!showNotifications)}>
             <span className="bell-icon">🔔</span>
             {unreadCount > 0 && <span className="notification-badge">{unreadCount}</span>}
           </div>
           <button className="btn-sm btn-secondary" onClick={() => setShowSettingsModal(true)}>
-            ⚙️ Settings
+            System Settings
           </button>
           <div className="user-avatar admin-avatar">
             {currentUser.name.charAt(0)}
@@ -117,43 +209,65 @@ const AdminDashboard = () => {
         </div>
       </div>
 
+      {showNotifications && (
+        <div className="admin-notifications-panel">
+          <div className="admin-notifications-header">
+            <h3>Notifications</h3>
+            <button className="btn-sm btn-secondary" onClick={() => markAllNotificationsAsRead(currentUser.id)}>
+              Mark all read
+            </button>
+          </div>
+          <div className="admin-notifications-list">
+            {notifications.slice(0, 5).map((note) => (
+              <div key={note.id} className={`admin-notification-item ${note.isRead ? '' : 'unread'}`}>
+                <p className="note-title">{note.title}</p>
+                <p className="note-message">{note.message}</p>
+              </div>
+            ))}
+            {notifications.length === 0 && (
+              <p className="admin-empty-note">No notifications right now.</p>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Navigation */}
       <div className="dashboard-nav">
         <button 
           className={`nav-tab ${activeSection === 'dashboard' ? 'active' : ''}`}
           onClick={() => handleSectionChange('dashboard')}
         >
-          <span>🏠</span> Dashboard
+          <span>🏠</span> {t('Dashboard')}
         </button>
         <button 
           className={`nav-tab ${activeSection === 'users' ? 'active' : ''}`}
           onClick={() => handleSectionChange('users')}
         >
-          <span>👥</span> Users
+          <span>👥</span> {t('Users')}
         </button>
         <button 
           className={`nav-tab ${activeSection === 'doctors' ? 'active' : ''}`}
           onClick={() => handleSectionChange('doctors')}
         >
-          <span>👨‍⚕️</span> Doctor Verification
+          <span>👨‍⚕️</span> {t('Doctor Verification')}
         </button>
         <button 
           className={`nav-tab ${activeSection === 'appointments' ? 'active' : ''}`}
           onClick={() => handleSectionChange('appointments')}
         >
-          <span>📅</span> Appointments
+          <span>📅</span> {t('Appointments')}
         </button>
         <button 
           className={`nav-tab ${activeSection === 'reports' ? 'active' : ''}`}
           onClick={() => handleSectionChange('reports')}
         >
-          <span>📊</span> Reports
+          <span>📊</span> {t('Reports')}
         </button>
         <button 
           className={`nav-tab ${activeSection === 'settings' ? 'active' : ''}`}
           onClick={() => handleSectionChange('settings')}
         >
-          <span>⚙️</span> Settings
+          <span>⚙️</span> {t('Settings')}
         </button>
       </div>
 
@@ -163,60 +277,145 @@ const AdminDashboard = () => {
         {/* ==================== DASHBOARD OVERVIEW ==================== */}
         {activeSection === 'dashboard' && (
           <div className="section-dashboard">
-            {/* Stats Grid */}
+            <div className="admin-command-hero">
+              <div className="command-hero-main">
+                <span className="hero-eyebrow">Platform Intelligence</span>
+                <h2>Unified visibility across care delivery, users, verification, and payments</h2>
+                <p>
+                  This live cockpit gives operations, finance, compliance, and service quality signals so admin teams can react quickly.
+                </p>
+                <div className="hero-tags">
+                  <span>Active Users: {activeUsersCount}</span>
+                  <span>Upcoming Appointments: {upcomingAppointments}</span>
+                  <span>Open Orders: {processingOrders.length}</span>
+                </div>
+              </div>
+              <div className="command-hero-score">
+                <div className="score-ring" style={{ '--score': `${systemHealthScore}%` }}>
+                  <strong>{systemHealthScore}%</strong>
+                  <span>System Health</span>
+                </div>
+                <ul>
+                  <li>Completion Rate: {completionRate}%</li>
+                  <li>Verification Rate: {verificationRate}%</li>
+                  <li>Payment Success: {paymentSuccessRate}%</li>
+                </ul>
+              </div>
+            </div>
+
+            {/* Executive KPI Grid */}
             <div className="admin-stats-grid">
               <div className="admin-stat-card">
                 <div className="stat-icon-wrapper blue">
-                  <span>👥</span>
+                  <span>Users</span>
                 </div>
                 <div className="stat-details">
-                  <div className="stat-value">{stats.totalPatients}</div>
-                  <div className="stat-label">Total Patients</div>
+                  <div className="stat-value">{users.length}</div>
+                  <div className="stat-label">Total Accounts</div>
                 </div>
               </div>
               <div className="admin-stat-card">
                 <div className="stat-icon-wrapper green">
-                  <span>👨‍⚕️</span>
+                  <span>Care</span>
                 </div>
                 <div className="stat-details">
-                  <div className="stat-value">{stats.totalDoctors}</div>
-                  <div className="stat-label">Total Doctors</div>
-                </div>
-              </div>
-              <div className="admin-stat-card">
-                <div className="stat-icon-wrapper purple">
-                  <span>💊</span>
-                </div>
-                <div className="stat-details">
-                  <div className="stat-value">{stats.totalPharmacists}</div>
-                  <div className="stat-label">Pharmacists</div>
-                </div>
-              </div>
-              <div className="admin-stat-card">
-                <div className="stat-icon-wrapper orange">
-                  <span>📅</span>
-                </div>
-                <div className="stat-details">
-                  <div className="stat-value">{stats.todayAppointments}</div>
-                  <div className="stat-label">Today's Appointments</div>
+                  <div className="stat-value">{stats.totalAppointments}</div>
+                  <div className="stat-label">Total Appointments</div>
                 </div>
               </div>
               <div className="admin-stat-card">
                 <div className="stat-icon-wrapper teal">
-                  <span>💰</span>
+                  <span>Revenue</span>
                 </div>
                 <div className="stat-details">
-                  <div className="stat-value">${stats.totalRevenue.toFixed(2)}</div>
-                  <div className="stat-label">Total Revenue</div>
+                  <div className="stat-value">{formatInr(platformRevenue)}</div>
+                  <div className="stat-label">Platform Revenue</div>
+                </div>
+              </div>
+              <div className="admin-stat-card">
+                <div className="stat-icon-wrapper orange">
+                  <span>Today</span>
+                </div>
+                <div className="stat-details">
+                  <div className="stat-value">{stats.todayAppointments}</div>
+                  <div className="stat-label">Today's Consultations</div>
                 </div>
               </div>
               <div className="admin-stat-card warning">
                 <div className="stat-icon-wrapper yellow">
-                  <span>⏳</span>
+                  <span>Risk</span>
                 </div>
                 <div className="stat-details">
-                  <div className="stat-value">{stats.pendingVerifications}</div>
-                  <div className="stat-label">Pending Verifications</div>
+                  <div className="stat-value">{systemAlerts.length}</div>
+                  <div className="stat-label">Active Alerts</div>
+                </div>
+              </div>
+              <div className="admin-stat-card">
+                <div className="stat-icon-wrapper purple">
+                  <span>Access</span>
+                </div>
+                <div className="stat-details">
+                  <div className="stat-value">{blockedUsersCount}</div>
+                  <div className="stat-label">Blocked Accounts</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="admin-insight-grid">
+              <div className="insight-card">
+                <div className="insight-head">
+                  <h3>System Risk Watchlist</h3>
+                  <span>{systemAlerts.length} alerts</span>
+                </div>
+                {systemAlerts.length === 0 && <p className="empty-chart">No high-priority risk signals. Platform is stable.</p>}
+                <div className="alert-list">
+                  {systemAlerts.map((alert, idx) => (
+                    <div key={idx} className={`alert-item ${alert.level}`}>
+                      <div>
+                        <strong>{alert.title}</strong>
+                        <p>{alert.value}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="insight-card">
+                <div className="insight-head">
+                  <h3>Revenue and Payments</h3>
+                  <span>Live settlement pulse</span>
+                </div>
+                <div className="finance-grid">
+                  <div>
+                    <p>Consultation Revenue</p>
+                    <strong>{formatInr(totalConsultationRevenue)}</strong>
+                  </div>
+                  <div>
+                    <p>Medicine Revenue</p>
+                    <strong>{formatInr(medicineRevenue)}</strong>
+                  </div>
+                  <div>
+                    <p>Paid Appointments</p>
+                    <strong>{paymentCapturedAppointments}</strong>
+                  </div>
+                  <div>
+                    <p>Pending Payments</p>
+                    <strong>{paymentPendingAppointments}</strong>
+                  </div>
+                </div>
+              </div>
+
+              <div className="insight-card">
+                <div className="insight-head">
+                  <h3>Operational Queues</h3>
+                  <span>Actionable workloads</span>
+                </div>
+                <div className="queue-list">
+                  <div className="queue-row"><span>Pending Appointments</span><strong>{pendingAppointments}</strong></div>
+                  <div className="queue-row"><span>Confirmed/Accepted</span><strong>{confirmedAppointments}</strong></div>
+                  <div className="queue-row"><span>Pending Doctor Verification</span><strong>{pendingDoctors.length}</strong></div>
+                  <div className="queue-row"><span>Orders in Processing</span><strong>{processingOrders.length}</strong></div>
+                  <div className="queue-row"><span>Delivered Orders</span><strong>{deliveredOrders.length}</strong></div>
                 </div>
               </div>
             </div>
@@ -226,7 +425,7 @@ const AdminDashboard = () => {
               {/* Appointments Chart */}
               <div className="chart-card">
                 <div className="chart-header">
-                  <h3>📊 Appointments (Last 7 Days)</h3>
+                  <h3>Appointment Demand (Last 7 Days)</h3>
                 </div>
                 <div className="chart-content">
                   <div className="bar-chart">
@@ -250,7 +449,7 @@ const AdminDashboard = () => {
               {/* Popular Specializations */}
               <div className="chart-card">
                 <div className="chart-header">
-                  <h3>🏆 Popular Specializations</h3>
+                  <h3>Top Specializations</h3>
                 </div>
                 <div className="chart-content">
                   <div className="specialization-list">
@@ -277,34 +476,102 @@ const AdminDashboard = () => {
               </div>
             </div>
 
+            <div className="admin-insight-grid lower">
+              <div className="insight-card">
+                <div className="insight-head">
+                  <h3>Top Doctor Workload</h3>
+                  <span>Capacity distribution</span>
+                </div>
+                <div className="leader-list">
+                  {topDoctorsByLoad.map((doc) => (
+                    <div key={doc.id} className="leader-item">
+                      <div>
+                        <strong>{doc.name}</strong>
+                        <p>{doc.specialization}</p>
+                      </div>
+                      <div className="leader-meta">
+                        <span>{doc.total} consults</span>
+                        <span>{doc.pending} pending</span>
+                      </div>
+                    </div>
+                  ))}
+                  {topDoctorsByLoad.length === 0 && <p className="empty-chart">No doctor workload data available.</p>}
+                </div>
+              </div>
+
+              <div className="insight-card">
+                <div className="insight-head">
+                  <h3>Recent Appointment Activity</h3>
+                  <span>Most recent 6 records</span>
+                </div>
+                <div className="activity-list">
+                  {recentAppointments.map((apt) => {
+                    const patient = getUserById(apt.patientId);
+                    const doctor = getDoctorById(apt.doctorId);
+                    return (
+                      <div key={apt.id} className="activity-item">
+                        <div>
+                          <strong>{patient?.name || 'Unknown'} with {doctor?.name || 'Unknown'}</strong>
+                          <p>{apt.date} at {apt.time} | {apt.type || 'Consultation'}</p>
+                        </div>
+                        <span className="badge badge-info">{apt.status}</span>
+                      </div>
+                    );
+                  })}
+                  {recentAppointments.length === 0 && <p className="empty-chart">No appointments yet.</p>}
+                </div>
+              </div>
+
+              <div className="insight-card">
+                <div className="insight-head">
+                  <h3>Recent Medicine Orders</h3>
+                  <span>Latest order pipeline</span>
+                </div>
+                <div className="activity-list">
+                  {recentOrders.map((order) => (
+                    <div key={order.id} className="activity-item">
+                      <div>
+                        <strong>Order #{order.id}</strong>
+                        <p>{order.patient?.name || 'Unknown patient'} | {formatInr(order.totalAmount)}</p>
+                      </div>
+                      <span className={`badge badge-${order.status === 'Delivered' ? 'success' : order.status === 'Dispatched' ? 'info' : 'warning'}`}>
+                        {order.status}
+                      </span>
+                    </div>
+                  ))}
+                  {recentOrders.length === 0 && <p className="empty-chart">No medicine orders yet.</p>}
+                </div>
+              </div>
+            </div>
+
             {/* Quick Stats Row */}
             <div className="quick-stats-row">
               <div className="quick-stat">
-                <div className="quick-stat-icon">✅</div>
+                <div className="quick-stat-icon">IP</div>
                 <div className="quick-stat-info">
-                  <span className="quick-stat-value">{stats.completedAppointments}</span>
-                  <span className="quick-stat-label">Completed</span>
+                  <span className="quick-stat-value">{inPersonAppointments}</span>
+                  <span className="quick-stat-label">In-Person Consultations</span>
                 </div>
               </div>
               <div className="quick-stat">
-                <div className="quick-stat-icon">❌</div>
+                <div className="quick-stat-icon">VC</div>
                 <div className="quick-stat-info">
-                  <span className="quick-stat-value">{stats.cancelledAppointments}</span>
-                  <span className="quick-stat-label">Cancelled</span>
+                  <span className="quick-stat-value">{videoAppointments}</span>
+                  <span className="quick-stat-label">Video Consultations</span>
                 </div>
               </div>
               <div className="quick-stat">
-                <div className="quick-stat-icon">📈</div>
+                <div className="quick-stat-icon">RX</div>
                 <div className="quick-stat-info">
-                  <span className="quick-stat-value">{stats.cancellationRate}%</span>
-                  <span className="quick-stat-label">Cancellation Rate</span>
+                  <span className="quick-stat-value">{prescriptions.length}</span>
+                  <span className="quick-stat-label">Total Prescriptions</span>
                 </div>
               </div>
               <div className="quick-stat">
-                <div className="quick-stat-icon">📦</div>
+                <div className="quick-stat-icon">UP</div>
                 <div className="quick-stat-info">
-                  <span className="quick-stat-value">{medicineOrders.length}</span>
-                  <span className="quick-stat-label">Total Orders</span>
+                  <span className="quick-stat-value">{upcomingAppointments}</span>
+                  <span className="quick-stat-label">Upcoming Appointments</span>
                 </div>
               </div>
             </div>
@@ -445,7 +712,7 @@ const AdminDashboard = () => {
                           </div>
                           <div className="info-item">
                             <span className="label">Consultation Fee:</span>
-                            <span className="value">${doctor.fee}</span>
+                            <span className="value">{formatInr(doctor.fee)}</span>
                           </div>
                         </div>
                         <div className="documents-section">
@@ -637,7 +904,7 @@ const AdminDashboard = () => {
                   <h3>💰 Revenue Summary</h3>
                 </div>
                 <div className="report-body">
-                  <div className="report-stat-large">${stats.totalRevenue.toFixed(2)}</div>
+                  <div className="report-stat-large">{formatInr(stats.totalRevenue)}</div>
                   <p>Total medicine order revenue</p>
                   <div className="report-breakdown">
                     <span>Orders: {medicineOrders.filter(o => o.status === 'Delivered').length}</span>
@@ -728,7 +995,7 @@ const AdminDashboard = () => {
                 </div>
                 <div className="settings-card-body">
                   <div className="setting-item">
-                    <label>Default Consultation Fee ($)</label>
+                    <label>Default Consultation Fee (INR)</label>
                     <input
                       type="number"
                       value={tempSettings.consultationFee}
@@ -744,7 +1011,7 @@ const AdminDashboard = () => {
                     />
                   </div>
                   <div className="setting-item">
-                    <label>Delivery Charge ($)</label>
+                    <label>Delivery Charge (INR)</label>
                     <input
                       type="number"
                       step="0.01"
@@ -753,7 +1020,7 @@ const AdminDashboard = () => {
                     />
                   </div>
                   <div className="setting-item">
-                    <label>Free Delivery Threshold ($)</label>
+                    <label>Free Delivery Threshold (INR)</label>
                     <input
                       type="number"
                       value={tempSettings.freeDeliveryThreshold}
